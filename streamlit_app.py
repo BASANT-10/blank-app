@@ -1,4 +1,4 @@
-# classifier_word_metrics.py  – run with:  streamlit run classifier_word_metrics.py
+# classifier_word_metrics.py  –  streamlit run classifier_word_metrics.py
 import streamlit as st
 import pandas as pd
 import re, ast
@@ -26,12 +26,12 @@ tactic = st.selectbox("🎯 Tactic to evaluate", list(default_tactics.keys()))
 text_col  = st.selectbox("📝 Text column",  df_raw.columns)
 label_col = st.selectbox("🏷️ Ground‑truth 0/1 column", df_raw.columns)
 
-# ─────────── NEW: optional ID for aggregation ────────────
+# optional ID
 id_options = ["<none – keep each row>"] + list(df_raw.columns)
 id_col = st.selectbox("🆔 (Optional) ID column for aggregation", id_options)
 
-# Pre‑clean text once
-def clean(txt:str) -> str: return re.sub(r"[^A-Za-z0-9\s]", "", str(txt).lower())
+# clean text once
+clean = lambda t: re.sub(r"[^A-Za-z0-9\s]", "", str(t).lower())
 df = df_raw.copy()
 df["_clean"] = df[text_col].astype(str).apply(clean)
 
@@ -45,7 +45,7 @@ if "last_mode" in st.session_state and st.session_state.last_mode != dict_mode:
         st.session_state.pop(k, None)
 st.session_state.last_mode = dict_mode
 
-# -------- Option A: generate --------
+# ----- Option A: generate from data -----
 if dict_mode == "🧠 Generate from data":
     if st.button("Generate top‑20 keyword dictionary"):
         freq = pd.Series(" ".join(df["_clean"]).split()).value_counts()
@@ -55,7 +55,7 @@ if dict_mode == "🧠 Generate from data":
         st.session_state.gen_ready = True
 
     if st.session_state.get("gen_ready"):
-        st.dataframe(st.session_state.top_words)            # show keywords
+        st.dataframe(st.session_state.top_words)
         dict_text = st.text_area("Edit dictionary",
                                  value=str(st.session_state.auto_dict),
                                  height=150, key="dict_edit")
@@ -67,7 +67,7 @@ if dict_mode == "🧠 Generate from data":
             except:
                 st.error("Bad format – fix and save again.")
 
-# -------- Option B: paste custom --------
+# ----- Option B: paste custom dictionary -----
 else:
     template = f"{{'{tactic}': {{'keyword1','keyword2'}}}}"
     dict_text = st.text_area("Paste dictionary", value=template, height=150)
@@ -89,16 +89,28 @@ keywords   = list(dictionary[tactic])
 st.header("🚀 Step 4 – Run evaluation")
 
 if st.button("Start evaluation"):
-    # predictions & matched words
+    # row‑level keyword matches & prediction
     df["_matches"] = df["_clean"].apply(lambda t:[k for k in keywords if k in t.split()])
     df["_pred"]    = df["_matches"].apply(lambda m: 1 if m else 0)
+    df["_coverage"]= df["_clean"].apply(lambda t: sum(1 for w in t.split() if w in keywords)/len(t.split()) if t.split() else 0)
 
-    # --- NEW: %‑of‑words coverage per row ---
-    df["_coverage"] = df["_clean"].apply(
-        lambda t: sum(1 for w in t.split() if w in keywords)/len(t.split()) if t.split() else 0
-    )
+    # ───────────── token‑level long table (NEW) ─────────────
+    token_rows = []
+    for idx, row in df.iterrows():
+        tokens = row["_clean"].split()
+        for tok in tokens:
+            token_rows.append({
+                "row_index": idx,
+                **({id_col: row[id_col]} if id_col != "<none – keep each row>" else {}),
+                "token": tok,
+                "is_keyword": 1 if tok in keywords else 0
+            })
+    token_df = pd.DataFrame(token_rows)
 
-    # --------------- ROW‑LEVEL RESULTS ---------------
+    st.subheader("🔠 Token‑level tagging (first 100 tokens)")
+    st.dataframe(token_df.head(100))
+
+    # ───────────── row‑level true positives  ─────────────
     st.subheader("📝 Row‑level true positives (first 20)")
     tp_rows = df[(df[label_col]==1)&(df["_pred"]==1)]
     st.dataframe(tp_rows.head(20))
@@ -106,24 +118,20 @@ if st.button("Start evaluation"):
     row_acc = (df[label_col]==df["_pred"]).mean()
     st.metric("Row‑level accuracy", f"{row_acc*100:.1f}%")
 
-    # --------------- ID‑LEVEL AGGREGATION ---------------
+    # ───────────── ID‑level aggregation (optional) ──────────
     if id_col != "<none – keep each row>":
         st.subheader("🆔 ID‑level aggregation")
-        # aggregate predictions: positive if ANY child row predicted positive
         grp = df.groupby(id_col)
         id_df = pd.DataFrame({
-            "true_label": grp[label_col].max(),             # any row has 1
+            "true_label": grp[label_col].max(),
             "pred_label": grp["_pred"].max(),
             "avg_coverage": grp["_coverage"].mean()
         }).reset_index()
-
         id_acc = (id_df["true_label"]==id_df["pred_label"]).mean()
         st.metric("ID‑level accuracy", f"{id_acc*100:.1f}%")
-
-        st.write("Preview of ID‑level table:")
         st.dataframe(id_df.head(20))
 
-    # --------------- KEYWORD METRICS -------------------
+    # ───────────── keyword metrics  ─────────────
     st.header("📊 Keyword impact analysis")
     rows=[]
     for kw in keywords:
@@ -137,34 +145,29 @@ if st.button("Start evaluation"):
         rows.append(dict(keyword=kw,tp=tp,fp=fp,fn=fn,precision=prec,recall=rec,f1=f1))
     met_df = pd.DataFrame(rows).set_index("keyword")
 
-    tabR,tabP,tabF = st.tabs(["Recall","Precision","F1"])
-    def show(df,metric):
-        for kw,row in df.head(10).iterrows():
-            st.write(f"**{kw}**"); st.progress(row[metric], text=f"{row[metric]:.2f}")
+    tabs = st.tabs(["Recall","Precision","F1"])
+    for tab,metric in zip(tabs,["recall","precision","f1"]):
+        with tab:
+            for kw,row in met_df.sort_values(metric,ascending=False).head(10).iterrows():
+                st.write(f"**{kw}**")
+                st.progress(row[metric], text=f"{row[metric]:.2f}")
 
-    with tabR: show(met_df.sort_values("recall",ascending=False),"recall")
-    with tabP: show(met_df.sort_values("precision",ascending=False),"precision")
-    with tabF:
-        best=met_df.sort_values("f1",ascending=False)
-        show(best,"f1")
-        st.markdown("### 🏆 Top‑3 overall")
-        for i,(kw,r) in enumerate(best.head(3).iterrows(),1):
-            st.markdown(f"{i}. **{kw}** – F1 {r['f1']:.2f}")
-
-    # --------------- EXAMPLE SENTENCES -----------------
+    # ───────────── example sentences  ─────────────
     st.header("🔎 Example cases")
     sel_kw = st.selectbox("Keyword", met_df.sort_values("f1",ascending=False).index)
     kw_mask = df["_clean"].str.contains(fr"\b{sel_kw}\b")
-    def samp(mask,truth): return df[mask & (df[label_col]==truth)][text_col].head(3).tolist()
-    TP,FP,FN = samp(kw_mask,1), samp(kw_mask,0), samp(~kw_mask,1)
-    def block(label,lst,color):
-        st.markdown(f"**{label}**")
-        for t in lst: st.markdown(f"<span style='background:{color};padding:2px'>{t}</span>", unsafe_allow_html=True)
-    block("True positives",TP,"#d4edda"); block("False positives",FP,"#f8d7da"); block("False negatives",FN,"#fff3cd")
+    def sample(mask,truth): return df[mask & (df[label_col]==truth)][text_col].head(3).tolist()
+    TP,FP,FN = sample( kw_mask,1), sample( kw_mask,0), sample(~kw_mask,1)
+    def show(tag,lst,col):
+        st.markdown(f"**{tag}**")
+        for t in lst:
+            st.markdown(f"<span style='background:{col};padding:2px'>{t}</span>", unsafe_allow_html=True)
+    show("True positives",TP,"#d4edda"); show("False positives",FP,"#f8d7da"); show("False negatives",FN,"#fff3cd")
 
-    # --------------- DOWNLOADS -------------------------
+    # ───────────── downloads  ─────────────
     st.subheader("💾 Download results")
-    st.download_button("rows_classified.csv", df.to_csv(index=False).encode(), "rows_classified.csv")
-    st.download_button("keyword_metrics.csv", met_df.to_csv().encode(), "keyword_metrics.csv")
+    st.download_button("rows_classified.csv",  df.to_csv(index=False).encode(),  "rows_classified.csv")
+    st.download_button("keyword_metrics.csv", met_df.to_csv().encode(),         "keyword_metrics.csv")
+    st.download_button("token_tags.csv",      token_df.to_csv(index=False).encode(), "token_tags.csv")
     if id_col != "<none – keep each row>":
         st.download_button("ids_classified.csv", id_df.to_csv(index=False).encode(), "ids_classified.csv")
